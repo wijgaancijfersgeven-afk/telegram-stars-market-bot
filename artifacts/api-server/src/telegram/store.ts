@@ -56,6 +56,61 @@ export type ActiveSubscription = {
   expiresAt: Date;
 };
 
+export type BackupProduct = {
+  id: number;
+  title: string;
+  description: string;
+  priceStars: number;
+  photoFileId: string | null;
+  postPurchaseMessage: string;
+  active: boolean;
+  createdAt: string;
+};
+
+export type BackupPlan = {
+  id: number;
+  title: string;
+  description: string;
+  priceStars: number;
+  periodSeconds: number;
+  postPurchaseMessage: string;
+  active: boolean;
+  createdAt: string;
+};
+
+export type BackupOrder = {
+  id: number;
+  userId: number;
+  itemType: "product" | "plan";
+  itemId: number;
+  itemTitle: string;
+  amountStars: number;
+  payload: string;
+  status: "pending" | "paid";
+  telegramChargeId: string | null;
+  createdAt: string;
+  paidAt: string | null;
+};
+
+export type BackupSubscription = {
+  id: number;
+  userId: number;
+  planId: number;
+  expiresAt: string;
+  updatedAt: string;
+};
+
+export type TelegramBackup = {
+  format: "telegram-bot-backup";
+  version: 1;
+  exportedAt: string;
+  products: BackupProduct[];
+  plans: BackupPlan[];
+  orders: BackupOrder[];
+  subscriptions: BackupSubscription[];
+  settings: Array<{ key: string; value: string }>;
+};
+
 function mapProduct(row: Record<string, unknown>): Product {
   return {
     id: Number(row.id),
@@ -449,4 +504,181 @@ export async function listUserSubscriptions(
     [userId],
   );
   return rows;
+}
+
+export async function createBackupSnapshot(): Promise<TelegramBackup> {
+  const [products, plans, orders, subscriptions, settings] = await Promise.all([
+    pool.query<BackupProduct>(
+      `SELECT id, title, description, price_stars AS "priceStars",
+        photo_file_id AS "photoFileId",
+        post_purchase_message AS "postPurchaseMessage", active,
+        created_at AS "createdAt"
+       FROM telegram_products ORDER BY id`,
+    ),
+    pool.query<BackupPlan>(
+      `SELECT id, title, description, price_stars AS "priceStars",
+        period_seconds AS "periodSeconds",
+        post_purchase_message AS "postPurchaseMessage", active,
+        created_at AS "createdAt"
+       FROM telegram_plans ORDER BY id`,
+    ),
+    pool.query<BackupOrder>(
+      `SELECT id, user_id AS "userId", item_type AS "itemType",
+        item_id AS "itemId", item_title AS "itemTitle",
+        amount_stars AS "amountStars", payload, status,
+        telegram_charge_id AS "telegramChargeId",
+        created_at AS "createdAt", paid_at AS "paidAt"
+       FROM telegram_orders ORDER BY id`,
+    ),
+    pool.query<BackupSubscription>(
+      `SELECT id, user_id AS "userId", plan_id AS "planId",
+        expires_at AS "expiresAt", updated_at AS "updatedAt"
+       FROM telegram_subscriptions ORDER BY id`,
+    ),
+    pool.query<{ key: string; value: string }>(
+      "SELECT key, value FROM telegram_settings ORDER BY key",
+    ),
+  ]);
+
+  return {
+    format: "telegram-bot-backup",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    products: products.rows.map((row) => ({
+      ...row,
+      createdAt: new Date(row.createdAt).toISOString(),
+    })),
+    plans: plans.rows.map((row) => ({
+      ...row,
+      createdAt: new Date(row.createdAt).toISOString(),
+    })),
+    orders: orders.rows.map((row) => ({
+      ...row,
+      userId: Number(row.userId),
+      createdAt: new Date(row.createdAt).toISOString(),
+      paidAt: row.paidAt ? new Date(row.paidAt).toISOString() : null,
+    })),
+    subscriptions: subscriptions.rows.map((row) => ({
+      ...row,
+      userId: Number(row.userId),
+      expiresAt: new Date(row.expiresAt).toISOString(),
+      updatedAt: new Date(row.updatedAt).toISOString(),
+    })),
+    settings: settings.rows,
+  };
+}
+
+export async function restoreBackup(snapshot: TelegramBackup): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM telegram_subscriptions");
+    await client.query("DELETE FROM telegram_orders");
+    await client.query("DELETE FROM telegram_products");
+    await client.query("DELETE FROM telegram_plans");
+    await client.query("DELETE FROM telegram_settings");
+
+    for (const product of snapshot.products) {
+      await client.query(
+        `INSERT INTO telegram_products
+          (id, title, description, price_stars, photo_file_id,
+           post_purchase_message, active, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          product.id,
+          product.title,
+          product.description,
+          product.priceStars,
+          product.photoFileId,
+          product.postPurchaseMessage,
+          product.active,
+          product.createdAt,
+        ],
+      );
+    }
+
+    for (const plan of snapshot.plans) {
+      await client.query(
+        `INSERT INTO telegram_plans
+          (id, title, description, price_stars, period_seconds,
+           post_purchase_message, active, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          plan.id,
+          plan.title,
+          plan.description,
+          plan.priceStars,
+          plan.periodSeconds,
+          plan.postPurchaseMessage,
+          plan.active,
+          plan.createdAt,
+        ],
+      );
+    }
+
+    for (const order of snapshot.orders) {
+      await client.query(
+        `INSERT INTO telegram_orders
+          (id, user_id, item_type, item_id, item_title, amount_stars,
+           payload, status, telegram_charge_id, created_at, paid_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          order.id,
+          order.userId,
+          order.itemType,
+          order.itemId,
+          order.itemTitle,
+          order.amountStars,
+          order.payload,
+          order.status,
+          order.telegramChargeId,
+          order.createdAt,
+          order.paidAt,
+        ],
+      );
+    }
+
+    for (const subscription of snapshot.subscriptions) {
+      await client.query(
+        `INSERT INTO telegram_subscriptions
+          (id, user_id, plan_id, expires_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          subscription.id,
+          subscription.userId,
+          subscription.planId,
+          subscription.expiresAt,
+          subscription.updatedAt,
+        ],
+      );
+    }
+
+    for (const setting of snapshot.settings) {
+      await client.query(
+        "INSERT INTO telegram_settings (key, value) VALUES ($1, $2)",
+        [setting.key, setting.value],
+      );
+    }
+
+    for (const table of [
+      "telegram_products",
+      "telegram_plans",
+      "telegram_orders",
+      "telegram_subscriptions",
+    ]) {
+      await client.query(
+        `SELECT setval(
+          pg_get_serial_sequence('${table}', 'id'),
+          COALESCE((SELECT MAX(id) FROM ${table}), 1),
+          EXISTS (SELECT 1 FROM ${table})
+        )`,
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

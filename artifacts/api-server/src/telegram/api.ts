@@ -15,6 +15,13 @@ export type TelegramPhoto = {
   height: number;
 };
 
+export type TelegramDocument = {
+  file_id: string;
+  file_name?: string;
+  file_size?: number;
+  mime_type?: string;
+};
+
 export type TelegramSuccessfulPayment = {
   currency: string;
   total_amount: number;
@@ -35,6 +42,7 @@ export type TelegramMessage = {
   };
   text?: string;
   photo?: TelegramPhoto[];
+  document?: TelegramDocument;
   successful_payment?: TelegramSuccessfulPayment;
 };
 
@@ -79,7 +87,18 @@ export async function telegramCall<T>(
   });
 
   if (!response.ok) {
-    throw new Error(`Telegram ${method} request failed (${response.status}).`);
+    let description = "";
+    try {
+      const errorBody = (await response.json()) as { description?: unknown };
+      if (typeof errorBody.description === "string") {
+        description = `: ${errorBody.description}`;
+      }
+    } catch {
+      // Keep the HTTP status as the useful error when Telegram returns no JSON.
+    }
+    throw new Error(
+      `Telegram ${method} request failed (${response.status})${description}.`,
+    );
   }
 
   const result = (await response.json()) as TelegramResponse<T>;
@@ -114,4 +133,64 @@ export function sendPhoto(
     caption,
     ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   });
+}
+
+export async function sendJsonDocument(
+  chatId: number,
+  filename: string,
+  content: string,
+  caption: string,
+): Promise<TelegramMessage> {
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
+  }
+
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("caption", caption);
+  form.append(
+    "document",
+    new Blob([content], { type: "application/json" }),
+    filename,
+  );
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(`Telegram sendDocument request failed (${response.status}).`);
+  }
+  const result = (await response.json()) as TelegramResponse<TelegramMessage>;
+  if (!result.ok || !result.result) {
+    throw new Error(`Telegram sendDocument failed: ${result.description ?? "unknown error"}`);
+  }
+  return result.result;
+}
+
+export async function downloadTelegramDocument(
+  fileId: string,
+  maxBytes: number,
+): Promise<string> {
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
+  }
+
+  const file = await telegramCall<{ file_path?: string; file_size?: number }>(
+    "getFile",
+    { file_id: fileId },
+  );
+  if (!file.file_path || (file.file_size != null && file.file_size > maxBytes)) {
+    throw new Error("Telegram backup file is missing or too large.");
+  }
+  const response = await fetch(
+    `https://api.telegram.org/file/bot${token}/${file.file_path}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Telegram file download failed (${response.status}).`);
+  }
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > maxBytes) {
+    throw new Error("Telegram backup file is too large.");
+  }
+  return new TextDecoder().decode(bytes);
 }

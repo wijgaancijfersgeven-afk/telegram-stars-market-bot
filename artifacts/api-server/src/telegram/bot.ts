@@ -1,15 +1,19 @@
 import { logger } from "../lib/logger";
 import {
+  downloadTelegramDocument,
   sendMessage,
   sendPhoto,
+  sendJsonDocument,
   telegramCall,
   type InlineKeyboard,
   type TelegramMessage,
   type TelegramUpdate,
 } from "./api";
+import { parseTelegramBackup } from "./backup";
 import {
   clearSession,
   completePayment,
+  createBackupSnapshot,
   createPendingOrder,
   createPlan,
   createProduct,
@@ -23,6 +27,7 @@ import {
   listProducts,
   listRecentOrders,
   listUserSubscriptions,
+  restoreBackup,
   saveSession,
   setPlanMessage,
   setProductMessage,
@@ -33,6 +38,7 @@ import {
 
 const SUBSCRIPTION_PERIOD_SECONDS = 2_592_000;
 const MAX_MESSAGE_LENGTH = 3_500;
+const MAX_BACKUP_BYTES = 8 * 1024 * 1024;
 
 function adminId(): number | null {
   const parsed = Number(process.env.TELEGRAM_ADMIN_ID);
@@ -68,10 +74,33 @@ const adminMenu = keyboard([
     { text: "Destek bağlantısı", callback_data: "adm:support" },
     { text: "Mağazayı gör", callback_data: "menu:store" },
   ],
+  [
+    { text: "Yedek al", callback_data: "adm:backup-export" },
+    { text: "Yedeği geri yükle", callback_data: "adm:backup-import" },
+  ],
 ]);
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acknowledgeCallback(
+  queryId: string,
+  options?: { text: string; show_alert?: boolean },
+): Promise<boolean> {
+  try {
+    await telegramCall<boolean>("answerCallbackQuery", {
+      callback_query_id: queryId,
+      ...(options ?? {}),
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("(400)")) {
+      logger.warn({ err: error }, "Ignoring an expired Telegram button callback");
+      return false;
+    }
+    throw error;
+  }
 }
 
 function asId(value: string | undefined): number | null {
@@ -306,6 +335,70 @@ async function showSupportSettings(chatId: number): Promise<void> {
     `Satın alanlara gösterilen yetkili bağlantısı: ${supportUrl || "Ayarlanmadı"}\n\nYeni bağlantı gönderebilir veya kapatmak için /clear yazabilirsiniz.`,
     keyboard([[{ text: "Yönetim menüsü", callback_data: "menu:admin" }]]),
   );
+}
+
+async function exportBackup(chatId: number): Promise<void> {
+  const snapshot = await createBackupSnapshot();
+  const content = JSON.stringify(snapshot, null, 2);
+  if (Buffer.byteLength(content, "utf8") > MAX_BACKUP_BYTES) {
+    await sendMessage(
+      chatId,
+      "Yedek dosyası 8 MB sınırını aşıyor. Lütfen eski sipariş geçmişini arşivleyip yeniden deneyin.",
+      adminMenu,
+    );
+    return;
+  }
+  const suffix = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+  await sendJsonDocument(
+    chatId,
+    `telegram-backup-${suffix}.json`,
+    content,
+    "Telegram bot yedeği. Ürünler, planlar, siparişler, abonelikler ve ayarlar bu dosyadadır.",
+  );
+}
+
+async function handleBackupDocument(message: TelegramMessage): Promise<void> {
+  const userId = message.from?.id;
+  const document = message.document;
+  if (!userId || !document) return;
+  const session = await getSession(userId);
+  if (session?.stage !== "backup-await-file") {
+    await sendMessage(
+      message.chat.id,
+      "Önce yönetim menüsünden “Yedeği geri yükle” seçeneğine basın.",
+      adminMenu,
+    );
+    return;
+  }
+  if (!document.file_name?.toLowerCase().endsWith(".json")) {
+    await sendMessage(message.chat.id, "Lütfen .json yedek dosyasını gönderin.");
+    return;
+  }
+  if (document.file_size != null && document.file_size > MAX_BACKUP_BYTES) {
+    await sendMessage(message.chat.id, "Yedek dosyası en fazla 8 MB olabilir.");
+    return;
+  }
+
+  try {
+    const contents = await downloadTelegramDocument(document.file_id, MAX_BACKUP_BYTES);
+    const parsed: unknown = JSON.parse(contents);
+    const snapshot = parseTelegramBackup(parsed);
+    await saveSession(userId, "backup-confirm", { snapshot });
+    await sendMessage(
+      message.chat.id,
+      `Yedek doğrulandı: ${snapshot.products.length} ürün, ${snapshot.plans.length} plan, ${snapshot.orders.length} sipariş ve ${snapshot.subscriptions.length} abonelik kaydı.\n\nOnaylarsanız mevcut ürünler, planlar, siparişler, abonelikler ve ayarlar bu yedekteki verilerle tamamen değişir.`,
+      keyboard([
+        [{ text: "Mevcut verileri yedekle değiştir", callback_data: "backup:confirm" }],
+        [{ text: "İptal et", callback_data: "backup:cancel" }],
+      ]),
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Invalid Telegram backup upload");
+    await sendMessage(
+      message.chat.id,
+      "Yedek okunamadı. Dosyanın bu bot tarafından oluşturulmuş, geçerli bir JSON yedeği olduğundan emin olun.",
+    );
+  }
 }
 
 async function startPurchase(
@@ -586,6 +679,11 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
+  if (isAdmin(userId) && message.document) {
+    await handleBackupDocument(message);
+    return;
+  }
+
   if (isAdmin(userId) && message.photo?.length) {
     await handlePhotoInput(chatId, userId, message);
     return;
@@ -626,15 +724,14 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
   const userId = query.from.id;
   const data = query.data;
 
-  if (data.startsWith("adm:") && !isAdmin(userId)) {
-    await telegramCall<boolean>("answerCallbackQuery", {
-      callback_query_id: query.id,
+  if ((data.startsWith("adm:") || data.startsWith("backup:")) && !isAdmin(userId)) {
+    await acknowledgeCallback(query.id, {
       text: "Bu işlem yöneticiye özeldir.",
       show_alert: true,
     });
     return;
   }
-  await telegramCall<boolean>("answerCallbackQuery", { callback_query_id: query.id });
+  if (!(await acknowledgeCallback(query.id))) return;
 
   if (data === "menu:home" || data === "menu:admin") {
     await showHome(chatId, userId);
@@ -654,6 +751,36 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
   }
   if (data === "menu:subscriptions") {
     await showSubscriptions(chatId, false, userId);
+    return;
+  }
+  if (data === "backup:cancel") {
+    await clearSession(userId);
+    await sendMessage(chatId, "Geri yükleme iptal edildi. Mevcut veriler değiştirilmedi.", adminMenu);
+    return;
+  }
+  if (data === "backup:confirm") {
+    const session = await getSession(userId);
+    if (session?.stage !== "backup-confirm") {
+      await sendMessage(chatId, "Onaylanacak bir yedek bulunamadı. Dosyayı yeniden yükleyin.", adminMenu);
+      return;
+    }
+    try {
+      const snapshot = parseTelegramBackup(session.data.snapshot);
+      await restoreBackup(snapshot);
+      await clearSession(userId);
+      await sendMessage(
+        chatId,
+        `Yedek geri yüklendi: ${snapshot.products.length} ürün, ${snapshot.plans.length} plan, ${snapshot.orders.length} sipariş ve ${snapshot.subscriptions.length} abonelik kaydı.`,
+        adminMenu,
+      );
+    } catch (error) {
+      logger.error({ err: error }, "Telegram backup restore failed");
+      await sendMessage(
+        chatId,
+        "Geri yükleme tamamlanamadı. İşlem geri alındı; mevcut veriler değiştirilmedi. Yedeği kontrol edip yeniden deneyin.",
+        adminMenu,
+      );
+    }
     return;
   }
   if (data.startsWith("buy:product:")) {
@@ -682,6 +809,15 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
   } else if (data === "adm:support") {
     await saveSession(userId, "support-url", {});
     await showSupportSettings(chatId);
+  } else if (data === "adm:backup-export") {
+    await exportBackup(chatId);
+  } else if (data === "adm:backup-import") {
+    await saveSession(userId, "backup-await-file", {});
+    await sendMessage(
+      chatId,
+      "Geri yüklenecek .json yedek dosyasını bu sohbete gönderin. Dosya doğrulanınca ayrıca onay isteyeceğim.",
+      keyboard([[{ text: "İptal et", callback_data: "backup:cancel" }]]),
+    );
   } else if (data === "adm:photo-skip") {
     const session = await getSession(userId);
     if (session?.stage === "product-photo") {

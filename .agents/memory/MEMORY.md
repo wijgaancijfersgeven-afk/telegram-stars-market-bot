@@ -1,0 +1,1 @@
+- [Telegram bot operations](telegram-backup-and-polling.md) — expired button callbacks must not block polling; photo file IDs restore only with the same bot.
