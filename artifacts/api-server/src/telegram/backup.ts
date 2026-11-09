@@ -1,6 +1,5 @@
 import type {
   BackupOrder,
-  BackupPlan,
   BackupProduct,
   BackupSubscription,
   TelegramBackup,
@@ -53,11 +52,20 @@ function parseProduct(value: unknown): BackupProduct {
   }
   const priceStars = positiveInteger(item.priceStars, "Product priceStars");
   if (priceStars > 1_000_000_000) throw new Error("Product price is too high.");
+  if (item.billingType !== "one_time" && item.billingType !== "subscription") {
+    throw new Error("Product billingType is invalid.");
+  }
+  const periodSeconds = positiveInteger(item.periodSeconds, "Product periodSeconds");
+  if (item.billingType === "subscription" && periodSeconds !== 2_592_000) {
+    throw new Error("Only 30-day Telegram Stars subscriptions are supported.");
+  }
   return {
     id: positiveInteger(item.id, "Product id"),
     title: text(item.title, "Product title", 120),
     description: text(item.description, "Product description", 800),
     priceStars,
+    billingType: item.billingType,
+    periodSeconds,
     photoFileId,
     postPurchaseMessage: text(
       item.postPurchaseMessage,
@@ -69,36 +77,9 @@ function parseProduct(value: unknown): BackupProduct {
   };
 }
 
-function parsePlan(value: unknown): BackupPlan {
-  const item = record(value, "Plan");
-  if (typeof item.active !== "boolean") {
-    throw new Error("Plan active flag is invalid.");
-  }
-  const priceStars = positiveInteger(item.priceStars, "Plan priceStars");
-  if (priceStars > 1_000_000_000) throw new Error("Plan price is too high.");
-  const periodSeconds = positiveInteger(item.periodSeconds, "Plan periodSeconds");
-  if (periodSeconds !== 2_592_000) {
-    throw new Error("Only 30-day Telegram Stars subscriptions are supported.");
-  }
-  return {
-    id: positiveInteger(item.id, "Plan id"),
-    title: text(item.title, "Plan title", 120),
-    description: text(item.description, "Plan description", 800),
-    priceStars,
-    periodSeconds,
-    postPurchaseMessage: text(
-      item.postPurchaseMessage,
-      "Plan postPurchaseMessage",
-      3_500,
-    ),
-    active: item.active,
-    createdAt: timestamp(item.createdAt, "Plan createdAt"),
-  };
-}
-
 function parseOrder(value: unknown): BackupOrder {
   const item = record(value, "Order");
-  if (item.itemType !== "product" && item.itemType !== "plan") {
+  if (item.itemType !== "product") {
     throw new Error("Order itemType is invalid.");
   }
   if (item.status !== "pending" && item.status !== "paid") {
@@ -134,7 +115,7 @@ function parseSubscription(value: unknown): BackupSubscription {
   return {
     id: positiveInteger(item.id, "Subscription id"),
     userId: positiveInteger(item.userId, "Subscription userId"),
-    planId: positiveInteger(item.planId, "Subscription planId"),
+    productId: positiveInteger(item.productId, "Subscription productId"),
     expiresAt: timestamp(item.expiresAt, "Subscription expiresAt"),
     updatedAt: timestamp(item.updatedAt, "Subscription updatedAt"),
   };
@@ -142,12 +123,11 @@ function parseSubscription(value: unknown): BackupSubscription {
 
 export function parseTelegramBackup(input: unknown): TelegramBackup {
   const backup = record(input, "Backup");
-  if (backup.format !== "telegram-bot-backup" || backup.version !== 1) {
+  if (backup.format !== "telegram-bot-backup" || backup.version !== 2) {
     throw new Error("Unsupported backup format or version.");
   }
 
   const products = list(backup.products, "Products", 10_000).map(parseProduct);
-  const plans = list(backup.plans, "Plans", 2_000).map(parsePlan);
   const orders = list(backup.orders, "Orders", 100_000).map(parseOrder);
   const subscriptions = list(backup.subscriptions, "Subscriptions", 100_000).map(
     parseSubscription,
@@ -174,7 +154,6 @@ export function parseTelegramBackup(input: unknown): TelegramBackup {
     }
   };
   unique(products.map((item) => item.id), "Products");
-  unique(plans.map((item) => item.id), "Plans");
   unique(orders.map((item) => item.id), "Orders");
   unique(subscriptions.map((item) => item.id), "Subscriptions");
   if (new Set(orders.map((item) => item.payload)).size !== orders.length) {
@@ -187,27 +166,22 @@ export function parseTelegramBackup(input: unknown): TelegramBackup {
     throw new Error("Orders contain duplicate Telegram charge IDs.");
   }
   const productIds = new Set(products.map((item) => item.id));
-  const planIds = new Set(plans.map((item) => item.id));
   for (const order of orders) {
-    if (
-      (order.itemType === "product" && !productIds.has(order.itemId)) ||
-      (order.itemType === "plan" && !planIds.has(order.itemId))
-    ) {
-      throw new Error("An order references a missing product or plan.");
+    if (!productIds.has(order.itemId)) {
+      throw new Error("An order references a missing product.");
     }
   }
   for (const subscription of subscriptions) {
-    if (!planIds.has(subscription.planId)) {
-      throw new Error("A subscription references a missing plan.");
+    if (!productIds.has(subscription.productId)) {
+      throw new Error("A subscription references a missing product.");
     }
   }
 
   return {
     format: "telegram-bot-backup",
-    version: 1,
+    version: 2,
     exportedAt: timestamp(backup.exportedAt, "Backup exportedAt"),
     products,
-    plans,
     orders,
     subscriptions,
     settings,

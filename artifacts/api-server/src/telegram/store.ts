@@ -6,17 +6,9 @@ export type Product = {
   title: string;
   description: string;
   priceStars: number;
-  photoFileId: string | null;
-  postPurchaseMessage: string;
-  active: boolean;
-};
-
-export type Plan = {
-  id: number;
-  title: string;
-  description: string;
-  priceStars: number;
+  billingType: "one_time" | "subscription";
   periodSeconds: number;
+  photoFileId: string | null;
   postPurchaseMessage: string;
   active: boolean;
 };
@@ -29,7 +21,7 @@ export type BotSession = {
 type PendingOrder = {
   id: number;
   userId: number;
-  itemType: "product" | "plan";
+  itemType: "product";
   itemId: number;
   itemTitle: string;
   amountStars: number;
@@ -38,7 +30,7 @@ type PendingOrder = {
 };
 
 export type PaidReceipt = {
-  itemType: "product" | "plan";
+  itemType: "product";
   itemTitle: string;
   postPurchaseMessage: string;
 };
@@ -61,18 +53,9 @@ export type BackupProduct = {
   title: string;
   description: string;
   priceStars: number;
-  photoFileId: string | null;
-  postPurchaseMessage: string;
-  active: boolean;
-  createdAt: string;
-};
-
-export type BackupPlan = {
-  id: number;
-  title: string;
-  description: string;
-  priceStars: number;
+  billingType: "one_time" | "subscription";
   periodSeconds: number;
+  photoFileId: string | null;
   postPurchaseMessage: string;
   active: boolean;
   createdAt: string;
@@ -81,7 +64,7 @@ export type BackupPlan = {
 export type BackupOrder = {
   id: number;
   userId: number;
-  itemType: "product" | "plan";
+  itemType: "product";
   itemId: number;
   itemTitle: string;
   amountStars: number;
@@ -95,17 +78,16 @@ export type BackupOrder = {
 export type BackupSubscription = {
   id: number;
   userId: number;
-  planId: number;
+  productId: number;
   expiresAt: string;
   updatedAt: string;
 };
 
 export type TelegramBackup = {
   format: "telegram-bot-backup";
-  version: 1;
+  version: 2;
   exportedAt: string;
   products: BackupProduct[];
-  plans: BackupPlan[];
   orders: BackupOrder[];
   subscriptions: BackupSubscription[];
   settings: Array<{ key: string; value: string }>;
@@ -117,19 +99,10 @@ function mapProduct(row: Record<string, unknown>): Product {
     title: String(row.title),
     description: String(row.description),
     priceStars: Number(row.priceStars),
-    photoFileId: row.photoFileId == null ? null : String(row.photoFileId),
-    postPurchaseMessage: String(row.postPurchaseMessage ?? ""),
-    active: Boolean(row.active),
-  };
-}
-
-function mapPlan(row: Record<string, unknown>): Plan {
-  return {
-    id: Number(row.id),
-    title: String(row.title),
-    description: String(row.description),
-    priceStars: Number(row.priceStars),
+    billingType:
+      row.billingType === "subscription" ? "subscription" : "one_time",
     periodSeconds: Number(row.periodSeconds),
+    photoFileId: row.photoFileId == null ? null : String(row.photoFileId),
     postPurchaseMessage: String(row.postPurchaseMessage ?? ""),
     active: Boolean(row.active),
   };
@@ -137,13 +110,8 @@ function mapPlan(row: Record<string, unknown>): Plan {
 
 const productColumns = `
   id, title, description, price_stars AS "priceStars",
+  billing_type AS "billingType", period_seconds AS "periodSeconds",
   photo_file_id AS "photoFileId",
-  post_purchase_message AS "postPurchaseMessage", active
-`;
-
-const planColumns = `
-  id, title, description, price_stars AS "priceStars",
-  period_seconds AS "periodSeconds",
   post_purchase_message AS "postPurchaseMessage", active
 `;
 
@@ -168,23 +136,36 @@ export async function createProduct(input: {
   title: string;
   description: string;
   priceStars: number;
+  billingType: "one_time" | "subscription";
   photoFileId: string | null;
   postPurchaseMessage: string;
 }): Promise<Product> {
   const { rows } = await pool.query<Record<string, unknown>>(
     `INSERT INTO telegram_products
-      (title, description, price_stars, photo_file_id, post_purchase_message)
-     VALUES ($1, $2, $3, $4, $5)
+      (title, description, price_stars, billing_type, period_seconds,
+       photo_file_id, post_purchase_message)
+     VALUES ($1, $2, $3, $4, 2592000, $5, $6)
      RETURNING ${productColumns}`,
     [
       input.title,
       input.description,
       input.priceStars,
+      input.billingType,
       input.photoFileId,
       input.postPurchaseMessage,
     ],
   );
   return mapProduct(rows[0] ?? {});
+}
+
+export async function setProductBillingType(
+  id: number,
+  billingType: "one_time" | "subscription",
+): Promise<void> {
+  await pool.query(
+    "UPDATE telegram_products SET billing_type = $1 WHERE id = $2",
+    [billingType, id],
+  );
 }
 
 export async function setProductMessage(
@@ -206,55 +187,6 @@ export async function toggleProduct(id: number): Promise<Product | null> {
   return rows[0] ? mapProduct(rows[0]) : null;
 }
 
-export async function listPlans(activeOnly = true): Promise<Plan[]> {
-  const { rows } = await pool.query<Record<string, unknown>>(
-    `SELECT ${planColumns} FROM telegram_plans
-     ${activeOnly ? "WHERE active = true" : ""}
-     ORDER BY id DESC`,
-  );
-  return rows.map(mapPlan);
-}
-
-export async function getPlan(id: number): Promise<Plan | null> {
-  const { rows } = await pool.query<Record<string, unknown>>(
-    `SELECT ${planColumns} FROM telegram_plans WHERE id = $1`,
-    [id],
-  );
-  return rows[0] ? mapPlan(rows[0]) : null;
-}
-
-export async function createPlan(input: {
-  title: string;
-  description: string;
-  priceStars: number;
-  postPurchaseMessage: string;
-}): Promise<Plan> {
-  const { rows } = await pool.query<Record<string, unknown>>(
-    `INSERT INTO telegram_plans
-      (title, description, price_stars, period_seconds, post_purchase_message)
-     VALUES ($1, $2, $3, 2592000, $4)
-     RETURNING ${planColumns}`,
-    [input.title, input.description, input.priceStars, input.postPurchaseMessage],
-  );
-  return mapPlan(rows[0] ?? {});
-}
-
-export async function setPlanMessage(id: number, message: string): Promise<void> {
-  await pool.query(
-    "UPDATE telegram_plans SET post_purchase_message = $1 WHERE id = $2",
-    [message, id],
-  );
-}
-
-export async function togglePlan(id: number): Promise<Plan | null> {
-  const { rows } = await pool.query<Record<string, unknown>>(
-    `UPDATE telegram_plans SET active = NOT active WHERE id = $1
-     RETURNING ${planColumns}`,
-    [id],
-  );
-  return rows[0] ? mapPlan(rows[0]) : null;
-}
-
 export async function saveSession(
   userId: number,
   stage: string,
@@ -264,17 +196,29 @@ export async function saveSession(
     `INSERT INTO telegram_sessions (user_id, stage, data)
      VALUES ($1, $2, $3)
      ON CONFLICT (user_id) DO UPDATE
-       SET stage = EXCLUDED.stage, data = EXCLUDED.data, updated_at = NOW()`,
+       SET stage = EXCLUDED.stage, data = EXCLUDED.data,
+           updated_at = CURRENT_TIMESTAMP`,
     [userId, stage, JSON.stringify(data)],
   );
 }
 
 export async function getSession(userId: number): Promise<BotSession | null> {
-  const { rows } = await pool.query<{ stage: string; data: Record<string, unknown> }>(
+  const { rows } = await pool.query<{
+    stage: string;
+    data: string | Record<string, unknown>;
+  }>(
     "SELECT stage, data FROM telegram_sessions WHERE user_id = $1",
     [userId],
   );
-  return rows[0] ?? null;
+  const session = rows[0];
+  if (!session) return null;
+  return {
+    stage: session.stage,
+    data:
+      typeof session.data === "string"
+        ? (JSON.parse(session.data) as Record<string, unknown>)
+        : session.data,
+  };
 }
 
 export async function clearSession(userId: number): Promise<void> {
@@ -283,7 +227,6 @@ export async function clearSession(userId: number): Promise<void> {
 
 export async function createPendingOrder(input: {
   userId: number;
-  itemType: "product" | "plan";
   itemId: number;
   itemTitle: string;
   amountStars: number;
@@ -292,10 +235,9 @@ export async function createPendingOrder(input: {
   await pool.query(
     `INSERT INTO telegram_orders
       (user_id, item_type, item_id, item_title, amount_stars, payload)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
+     VALUES ($1, 'product', $2, $3, $4, $5)`,
     [
       input.userId,
-      input.itemType,
       input.itemId,
       input.itemTitle,
       input.amountStars,
@@ -312,7 +254,7 @@ export async function isValidPreCheckout(input: {
   totalAmount: number;
 }): Promise<boolean> {
   const { rows } = await pool.query<PendingOrder>(
-    `SELECT id, user_id AS "userId", item_type AS "itemType",
+    `SELECT id, user_id AS "userId", 'product' AS "itemType",
       item_id AS "itemId", item_title AS "itemTitle",
       amount_stars AS "amountStars", payload, status
      FROM telegram_orders WHERE payload = $1`,
@@ -341,7 +283,7 @@ export async function completePayment(input: {
     await client.query("BEGIN");
 
     const duplicate = await client.query<PendingOrder>(
-      `SELECT id, user_id AS "userId", item_type AS "itemType",
+      `SELECT id, user_id AS "userId", 'product' AS "itemType",
         item_id AS "itemId", item_title AS "itemTitle",
         amount_stars AS "amountStars", payload, status
        FROM telegram_orders WHERE telegram_charge_id = $1`,
@@ -358,10 +300,10 @@ export async function completePayment(input: {
     }
 
     const result = await client.query<PendingOrder>(
-      `SELECT id, user_id AS "userId", item_type AS "itemType",
+      `SELECT id, user_id AS "userId", 'product' AS "itemType",
         item_id AS "itemId", item_title AS "itemTitle",
         amount_stars AS "amountStars", payload, status
-       FROM telegram_orders WHERE payload = $1 FOR UPDATE`,
+       FROM telegram_orders WHERE payload = $1`,
       [input.payload],
     );
     const order = result.rows[0];
@@ -378,27 +320,31 @@ export async function completePayment(input: {
 
     await client.query(
       `UPDATE telegram_orders
-       SET status = 'paid', telegram_charge_id = $1, paid_at = NOW()
+       SET status = 'paid', telegram_charge_id = $1, paid_at = CURRENT_TIMESTAMP
        WHERE id = $2`,
       [input.chargeId, order.id],
     );
 
-    if (order.itemType === "plan") {
-      const planResult = await client.query<{ periodSeconds: number }>(
-        `SELECT period_seconds AS "periodSeconds"
-         FROM telegram_plans WHERE id = $1`,
-        [order.itemId],
-      );
-      const seconds = planResult.rows[0]?.periodSeconds ?? 2_592_000;
+    const productResult = await client.query<{
+      billingType: string;
+      periodSeconds: number;
+    }>(
+      `SELECT billing_type AS "billingType", period_seconds AS "periodSeconds"
+       FROM telegram_products WHERE id = $1`,
+      [order.itemId],
+    );
+    const product = productResult.rows[0];
+    if (product?.billingType === "subscription") {
       const expiresAt = input.subscriptionExpirationDate
         ? new Date(input.subscriptionExpirationDate * 1000)
-        : new Date(Date.now() + seconds * 1000);
+        : new Date(Date.now() + (product.periodSeconds || 2_592_000) * 1000);
 
       await client.query(
-        `INSERT INTO telegram_subscriptions (user_id, plan_id, expires_at)
+        `INSERT INTO telegram_subscriptions (user_id, product_id, expires_at)
          VALUES ($1, $2, $3)
-         ON CONFLICT (user_id, plan_id) DO UPDATE
-           SET expires_at = EXCLUDED.expires_at, updated_at = NOW()`,
+         ON CONFLICT (user_id, product_id) DO UPDATE
+           SET expires_at = EXCLUDED.expires_at,
+               updated_at = CURRENT_TIMESTAMP`,
         [input.userId, order.itemId, expiresAt],
       );
     }
@@ -425,21 +371,6 @@ async function loadReceipt(
     return rows[0]
       ? {
           itemType: "product",
-          itemTitle: order.itemTitle,
-          postPurchaseMessage: rows[0].postPurchaseMessage,
-        }
-      : null;
-  }
-
-  if (order.itemType === "plan") {
-    const { rows } = await pool.query<{ postPurchaseMessage: string }>(
-      `SELECT post_purchase_message AS "postPurchaseMessage"
-       FROM telegram_plans WHERE id = $1`,
-      [order.itemId],
-    );
-    return rows[0]
-      ? {
-          itemType: "plan",
           itemTitle: order.itemTitle,
           postPurchaseMessage: rows[0].postPurchaseMessage,
         }
@@ -482,11 +413,11 @@ export async function listActiveSubscriptions(): Promise<
     title: string;
     expiresAt: Date;
   }>(
-    `SELECT s.user_id AS "userId", p.title,
+      `SELECT s.user_id AS "userId", p.title,
       s.expires_at AS "expiresAt"
      FROM telegram_subscriptions s
-     JOIN telegram_plans p ON p.id = s.plan_id
-     WHERE s.expires_at > NOW()
+      JOIN telegram_products p ON p.id = s.product_id
+      WHERE s.expires_at > CURRENT_TIMESTAMP
      ORDER BY s.expires_at ASC LIMIT 15`,
   );
   return rows;
@@ -498,8 +429,8 @@ export async function listUserSubscriptions(
   const { rows } = await pool.query<ActiveSubscription>(
     `SELECT p.title, s.expires_at AS "expiresAt"
      FROM telegram_subscriptions s
-     JOIN telegram_plans p ON p.id = s.plan_id
-     WHERE s.user_id = $1 AND s.expires_at > NOW()
+     JOIN telegram_products p ON p.id = s.product_id
+     WHERE s.user_id = $1 AND s.expires_at > CURRENT_TIMESTAMP
      ORDER BY s.expires_at ASC`,
     [userId],
   );
@@ -507,23 +438,17 @@ export async function listUserSubscriptions(
 }
 
 export async function createBackupSnapshot(): Promise<TelegramBackup> {
-  const [products, plans, orders, subscriptions, settings] = await Promise.all([
+  const [products, orders, subscriptions, settings] = await Promise.all([
     pool.query<BackupProduct>(
       `SELECT id, title, description, price_stars AS "priceStars",
+        billing_type AS "billingType", period_seconds AS "periodSeconds",
         photo_file_id AS "photoFileId",
         post_purchase_message AS "postPurchaseMessage", active,
         created_at AS "createdAt"
        FROM telegram_products ORDER BY id`,
     ),
-    pool.query<BackupPlan>(
-      `SELECT id, title, description, price_stars AS "priceStars",
-        period_seconds AS "periodSeconds",
-        post_purchase_message AS "postPurchaseMessage", active,
-        created_at AS "createdAt"
-       FROM telegram_plans ORDER BY id`,
-    ),
     pool.query<BackupOrder>(
-      `SELECT id, user_id AS "userId", item_type AS "itemType",
+      `SELECT id, user_id AS "userId", 'product' AS "itemType",
         item_id AS "itemId", item_title AS "itemTitle",
         amount_stars AS "amountStars", payload, status,
         telegram_charge_id AS "telegramChargeId",
@@ -531,7 +456,7 @@ export async function createBackupSnapshot(): Promise<TelegramBackup> {
        FROM telegram_orders ORDER BY id`,
     ),
     pool.query<BackupSubscription>(
-      `SELECT id, user_id AS "userId", plan_id AS "planId",
+      `SELECT id, user_id AS "userId", product_id AS "productId",
         expires_at AS "expiresAt", updated_at AS "updatedAt"
        FROM telegram_subscriptions ORDER BY id`,
     ),
@@ -542,13 +467,9 @@ export async function createBackupSnapshot(): Promise<TelegramBackup> {
 
   return {
     format: "telegram-bot-backup",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     products: products.rows.map((row) => ({
-      ...row,
-      createdAt: new Date(row.createdAt).toISOString(),
-    })),
-    plans: plans.rows.map((row) => ({
       ...row,
       createdAt: new Date(row.createdAt).toISOString(),
     })),
@@ -575,43 +496,25 @@ export async function restoreBackup(snapshot: TelegramBackup): Promise<void> {
     await client.query("DELETE FROM telegram_subscriptions");
     await client.query("DELETE FROM telegram_orders");
     await client.query("DELETE FROM telegram_products");
-    await client.query("DELETE FROM telegram_plans");
     await client.query("DELETE FROM telegram_settings");
 
     for (const product of snapshot.products) {
       await client.query(
         `INSERT INTO telegram_products
-          (id, title, description, price_stars, photo_file_id,
-           post_purchase_message, active, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          (id, title, description, price_stars, billing_type, period_seconds,
+           photo_file_id, post_purchase_message, active, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           product.id,
           product.title,
           product.description,
           product.priceStars,
+          product.billingType,
+          product.periodSeconds,
           product.photoFileId,
           product.postPurchaseMessage,
           product.active,
           product.createdAt,
-        ],
-      );
-    }
-
-    for (const plan of snapshot.plans) {
-      await client.query(
-        `INSERT INTO telegram_plans
-          (id, title, description, price_stars, period_seconds,
-           post_purchase_message, active, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [
-          plan.id,
-          plan.title,
-          plan.description,
-          plan.priceStars,
-          plan.periodSeconds,
-          plan.postPurchaseMessage,
-          plan.active,
-          plan.createdAt,
         ],
       );
     }
@@ -641,12 +544,12 @@ export async function restoreBackup(snapshot: TelegramBackup): Promise<void> {
     for (const subscription of snapshot.subscriptions) {
       await client.query(
         `INSERT INTO telegram_subscriptions
-          (id, user_id, plan_id, expires_at, updated_at)
+          (id, user_id, product_id, expires_at, updated_at)
          VALUES ($1, $2, $3, $4, $5)`,
         [
           subscription.id,
           subscription.userId,
-          subscription.planId,
+          subscription.productId,
           subscription.expiresAt,
           subscription.updatedAt,
         ],
@@ -660,20 +563,6 @@ export async function restoreBackup(snapshot: TelegramBackup): Promise<void> {
       );
     }
 
-    for (const table of [
-      "telegram_products",
-      "telegram_plans",
-      "telegram_orders",
-      "telegram_subscriptions",
-    ]) {
-      await client.query(
-        `SELECT setval(
-          pg_get_serial_sequence('${table}', 'id'),
-          COALESCE((SELECT MAX(id) FROM ${table}), 1),
-          EXISTS (SELECT 1 FROM ${table})
-        )`,
-      );
-    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
