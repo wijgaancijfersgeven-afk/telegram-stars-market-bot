@@ -1,44 +1,56 @@
-# [Project name]
+# Telegram Stars Market Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Telegram-only shop for digital products, with one-time Telegram Stars payments and an admin-controlled product catalog.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `TELEGRAM_BOT_TOKEN`
+- Required env: `TELEGRAM_ADMIN_ID`
+- Optional env: `SQLITE_PATH` — SQLite file path; defaults to `artifacts/api-server/data/telegram.sqlite` when launched from the API package
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
 - API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
+- DB: SQLite using Node.js's built-in `node:sqlite`
+- Payments: Telegram Stars, one-time product purchases only
+- Validation: Zod (`zod/v4`)
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/telegram/bot.ts` — bot menus, admin flows, and payment handling
+- `artifacts/api-server/src/telegram/store.ts` — product/order persistence and JSON backup/restore
+- `lib/db/src/schema/index.ts` — SQLite schema
+- `railway.json` — Railway build/start/health-check settings
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Product data, orders, settings, and admin setup are managed inside Telegram; there is no web admin panel.
+- All product invoices are one-time Telegram Stars payments. The bot does not create or renew subscriptions.
+- SQLite is the production database. Railway needs a persistent volume mounted at `/data` with `SQLITE_PATH=/data/telegram.sqlite`.
+- JSON backups include products, order history, and settings. Restoring replaces current records after admin confirmation.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Customers browse digital products and pay with Telegram Stars.
+- The admin can add products, attach photos, configure a post-purchase message, manage sales status, set a support link, and export/import backups.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep the interface in Turkish, with emoji-led labels and uppercase headings.
+- Keep SQLite; do not migrate this project to PostgreSQL.
+- Use a public GitHub repository for Railway deployment.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Keep SQLite files out of Git. On Railway, attach a persistent volume at `/data`; the container filesystem alone is not durable.
+- Telegram photo `file_id` values are tied to the bot that received them, so changing bot tokens can make restored product photos unavailable.
+- Telegram Stars invoices must use currency `XTR` and an empty provider token.
 
 ## Pointers
 

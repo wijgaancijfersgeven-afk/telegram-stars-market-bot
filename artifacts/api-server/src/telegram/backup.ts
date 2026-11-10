@@ -1,7 +1,6 @@
 import type {
   BackupOrder,
   BackupProduct,
-  BackupSubscription,
   TelegramBackup,
 } from "./store";
 
@@ -52,20 +51,11 @@ function parseProduct(value: unknown): BackupProduct {
   }
   const priceStars = positiveInteger(item.priceStars, "Product priceStars");
   if (priceStars > 1_000_000_000) throw new Error("Product price is too high.");
-  if (item.billingType !== "one_time" && item.billingType !== "subscription") {
-    throw new Error("Product billingType is invalid.");
-  }
-  const periodSeconds = positiveInteger(item.periodSeconds, "Product periodSeconds");
-  if (item.billingType === "subscription" && periodSeconds !== 2_592_000) {
-    throw new Error("Only 30-day Telegram Stars subscriptions are supported.");
-  }
   return {
     id: positiveInteger(item.id, "Product id"),
     title: text(item.title, "Product title", 120),
     description: text(item.description, "Product description", 800),
     priceStars,
-    billingType: item.billingType,
-    periodSeconds,
     photoFileId,
     postPurchaseMessage: text(
       item.postPurchaseMessage,
@@ -74,6 +64,38 @@ function parseProduct(value: unknown): BackupProduct {
     ),
     active: item.active,
     createdAt: timestamp(item.createdAt, "Product createdAt"),
+  };
+}
+
+function parseLegacyPlanAsProduct(
+  value: unknown,
+  productId: number,
+): BackupProduct {
+  const item = record(value, "Legacy plan");
+  if (typeof item.active !== "boolean") {
+    throw new Error("Legacy plan active flag is invalid.");
+  }
+  const priceStars = positiveInteger(item.priceStars, "Legacy plan priceStars");
+  const periodSeconds = positiveInteger(
+    item.periodSeconds,
+    "Legacy plan periodSeconds",
+  );
+  if (priceStars > 1_000_000_000 || periodSeconds !== 2_592_000) {
+    throw new Error("Legacy plan values are invalid.");
+  }
+  return {
+    id: productId,
+    title: text(item.title, "Legacy plan title", 120),
+    description: text(item.description, "Legacy plan description", 800),
+    priceStars,
+    photoFileId: null,
+    postPurchaseMessage: text(
+      item.postPurchaseMessage,
+      "Legacy plan postPurchaseMessage",
+      3_500,
+    ),
+    active: item.active,
+    createdAt: timestamp(item.createdAt, "Legacy plan createdAt"),
   };
 }
 
@@ -110,28 +132,55 @@ function parseOrder(value: unknown): BackupOrder {
   };
 }
 
-function parseSubscription(value: unknown): BackupSubscription {
-  const item = record(value, "Subscription");
-  return {
-    id: positiveInteger(item.id, "Subscription id"),
-    userId: positiveInteger(item.userId, "Subscription userId"),
-    productId: positiveInteger(item.productId, "Subscription productId"),
-    expiresAt: timestamp(item.expiresAt, "Subscription expiresAt"),
-    updatedAt: timestamp(item.updatedAt, "Subscription updatedAt"),
-  };
-}
-
 export function parseTelegramBackup(input: unknown): TelegramBackup {
   const backup = record(input, "Backup");
-  if (backup.format !== "telegram-bot-backup" || backup.version !== 2) {
+  if (
+    backup.format !== "telegram-bot-backup" ||
+    (backup.version !== 1 && backup.version !== 2)
+  ) {
     throw new Error("Unsupported backup format or version.");
   }
 
   const products = list(backup.products, "Products", 10_000).map(parseProduct);
-  const orders = list(backup.orders, "Orders", 100_000).map(parseOrder);
-  const subscriptions = list(backup.subscriptions, "Subscriptions", 100_000).map(
-    parseSubscription,
-  );
+  const legacyPlanIds = new Map<number, number>();
+  let ignoredLegacySubscriptions = 0;
+  if (backup.version === 1) {
+    const plans = list(backup.plans, "Legacy plans", 2_000);
+    let nextProductId =
+      products.reduce((maximum, product) => Math.max(maximum, product.id), 0) + 1;
+    for (const planValue of plans) {
+      const plan = record(planValue, "Legacy plan");
+      const oldPlanId = positiveInteger(plan.id, "Legacy plan id");
+      if (legacyPlanIds.has(oldPlanId)) {
+        throw new Error("Legacy plans contain duplicate IDs.");
+      }
+      if (!Number.isSafeInteger(nextProductId)) {
+        throw new Error("Cannot assign a product ID to a legacy plan.");
+      }
+      legacyPlanIds.set(oldPlanId, nextProductId);
+      products.push(parseLegacyPlanAsProduct(planValue, nextProductId));
+      nextProductId += 1;
+    }
+    ignoredLegacySubscriptions = list(
+      backup.subscriptions ?? [],
+      "Legacy subscriptions",
+      100_000,
+    ).length;
+  }
+  const orders = list(backup.orders, "Orders", 100_000).map((value) => {
+    if (backup.version === 1) {
+      const item = record(value, "Order");
+      if (item.itemType === "plan") {
+        const legacyPlanId = positiveInteger(item.itemId, "Order itemId");
+        const productId = legacyPlanIds.get(legacyPlanId);
+        if (!productId) {
+          throw new Error("An order references a missing legacy plan.");
+        }
+        return parseOrder({ ...item, itemType: "product", itemId: productId });
+      }
+    }
+    return parseOrder(value);
+  });
   const rawSettings = list(backup.settings, "Settings", 50);
   const settings = rawSettings.map((value) => {
     const setting = record(value, "Setting");
@@ -155,7 +204,6 @@ export function parseTelegramBackup(input: unknown): TelegramBackup {
   };
   unique(products.map((item) => item.id), "Products");
   unique(orders.map((item) => item.id), "Orders");
-  unique(subscriptions.map((item) => item.id), "Subscriptions");
   if (new Set(orders.map((item) => item.payload)).size !== orders.length) {
     throw new Error("Orders contain duplicate invoice payloads.");
   }
@@ -171,19 +219,20 @@ export function parseTelegramBackup(input: unknown): TelegramBackup {
       throw new Error("An order references a missing product.");
     }
   }
-  for (const subscription of subscriptions) {
-    if (!productIds.has(subscription.productId)) {
-      throw new Error("A subscription references a missing product.");
-    }
-  }
-
   return {
     format: "telegram-bot-backup",
     version: 2,
     exportedAt: timestamp(backup.exportedAt, "Backup exportedAt"),
     products,
     orders,
-    subscriptions,
     settings,
+    ...(backup.version === 1
+      ? {
+          legacyConversion: {
+            convertedPlans: legacyPlanIds.size,
+            ignoredSubscriptions: ignoredLegacySubscriptions,
+          },
+        }
+      : {}),
   };
 }

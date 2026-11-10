@@ -27,9 +27,6 @@ export type TelegramSuccessfulPayment = {
   total_amount: number;
   invoice_payload: string;
   telegram_payment_charge_id: string;
-  subscription_expiration_date?: number;
-  is_recurring?: boolean;
-  is_first_recurring?: boolean;
 };
 
 export type TelegramMessage = {

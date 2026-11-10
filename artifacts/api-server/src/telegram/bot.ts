@@ -20,19 +20,15 @@ import {
   getSession,
   getSetting,
   isValidPreCheckout,
-  listActiveSubscriptions,
   listProducts,
   listRecentOrders,
-  listUserSubscriptions,
   restoreBackup,
   saveSession,
-  setProductBillingType,
   setProductMessage,
   setSetting,
   toggleProduct,
 } from "./store";
 
-const SUBSCRIPTION_PERIOD_SECONDS = 2_592_000;
 const MAX_MESSAGE_LENGTH = 3_500;
 const MAX_BACKUP_BYTES = 8 * 1024 * 1024;
 
@@ -50,10 +46,7 @@ function keyboard(rows: InlineKeyboard["inline_keyboard"]): InlineKeyboard {
 }
 
 const customerMenu = keyboard([
-  [
-    { text: "🛍️ ÜRÜN KATALOĞU", callback_data: "menu:products" },
-    { text: "🔁 ABONELİKLERİM", callback_data: "menu:subscriptions" },
-  ],
+  [{ text: "🛍️ ÜRÜN KATALOĞU", callback_data: "menu:products" }],
 ]);
 
 const adminMenu = keyboard([
@@ -61,15 +54,15 @@ const adminMenu = keyboard([
     { text: "📦 ÜRÜNLERİ YÖNET", callback_data: "adm:products" },
     { text: "🧾 SON SİPARİŞLER", callback_data: "adm:orders" },
   ],
-  [
-    { text: "🔁 AKTİF ABONELİKLER", callback_data: "adm:subscriptions" },
-    { text: "🛍️ MAĞAZAYI GÖR", callback_data: "menu:store" },
-  ],
+  [{ text: "🛍️ MAĞAZAYI GÖR", callback_data: "menu:store" }],
   [
     { text: "💬 DESTEK BAĞLANTISI", callback_data: "adm:support" },
     { text: "💾 YEDEK AL", callback_data: "adm:backup-export" },
   ],
-  [{ text: "📥 YEDEĞİ GERİ YÜKLE", callback_data: "adm:backup-import" }],
+  [
+    { text: "📥 YEDEĞİ GERİ YÜKLE", callback_data: "adm:backup-import" },
+    { text: "🏠 MAĞAZA MENÜSÜ", callback_data: "menu:home" },
+  ],
 ]);
 
 function delay(ms: number): Promise<void> {
@@ -139,11 +132,7 @@ async function showProducts(chatId: number, adminMode = false): Promise<void> {
   }
 
   for (const product of products) {
-    const billingLabel =
-      product.billingType === "subscription"
-        ? "🔁 AYLIK ABONELİK"
-        : "🛒 TEK SEFERLİK ÜRÜN";
-    const caption = `🛍️ ${product.title.toLocaleUpperCase("tr-TR")}\n\n${product.description}\n\n${billingLabel}\n⭐ FİYAT: ${product.priceStars} Stars`;
+    const caption = `🛍️ ${product.title.toLocaleUpperCase("tr-TR")}\n\n${product.description}\n\n⭐ FİYAT: ${product.priceStars} Stars`;
     if (adminMode) {
       const status = product.active ? "🟢 SATIŞTA" : "⚪ KAPALI";
       await sendMessage(
@@ -153,7 +142,7 @@ async function showProducts(chatId: number, adminMode = false): Promise<void> {
       );
     } else {
       const markup = keyboard([
-        [{ text: product.billingType === "subscription" ? "⭐ AYLIK ABONE OL" : "⭐ SATIN AL", callback_data: `buy:product:${product.id}` }],
+        [{ text: "⭐ SATIN AL", callback_data: `buy:product:${product.id}` }],
         [{ text: "🏠 ANA MENÜ", callback_data: "menu:home" }],
       ]);
       if (product.photoFileId) {
@@ -181,14 +170,11 @@ async function sendProductSettings(chatId: number, id: number): Promise<void> {
     await sendMessage(chatId, "⚠️ ÜRÜN BULUNAMADI.", adminMenu);
     return;
   }
-  const billingLabel =
-    product.billingType === "subscription" ? "🔁 AYLIK ABONELİK" : "🛒 TEK SEFERLİK";
   await sendMessage(
     chatId,
-    `📦 ${product.title.toLocaleUpperCase("tr-TR")}\n⭐ FİYAT: ${product.priceStars} Stars\n💳 TÜR: ${billingLabel}\n📊 DURUM: ${product.active ? "🟢 SATIŞTA" : "⚪ KAPALI"}\n\n✉️ SATIN ALMA SONRASI MESAJ:\n${product.postPurchaseMessage || "(boş)"}`,
+    `📦 ${product.title.toLocaleUpperCase("tr-TR")}\n⭐ FİYAT: ${product.priceStars} Stars\n💳 ÖDEME: TEK SEFERLİK\n📊 DURUM: ${product.active ? "🟢 SATIŞTA" : "⚪ KAPALI"}\n\n✉️ SATIN ALMA SONRASI MESAJ:\n${product.postPurchaseMessage || "(boş)"}`,
     keyboard([
       [{ text: "✉️ MESAJI DÜZENLE", callback_data: `adm:product-message:${id}` }],
-      [{ text: product.billingType === "subscription" ? "🛒 TEK SEFERLİK YAP" : "🔁 ABONELİK YAP", callback_data: `adm:product-type:${id}` }],
       [{ text: product.active ? "⏸️ SATIŞTAN KALDIR" : "🟢 SATIŞA AÇ", callback_data: `adm:product-toggle:${id}` }],
       [{ text: "📦 ÜRÜN LİSTESİ", callback_data: "adm:products" }],
     ]),
@@ -229,43 +215,12 @@ async function showOrders(chatId: number): Promise<void> {
   await sendMessage(chatId, `🧾 SON SİPARİŞLER\n\n${lines.join("\n")}`, adminMenu);
 }
 
-async function showSubscriptions(chatId: number, adminMode: boolean, userId: number): Promise<void> {
-  if (adminMode) {
-    const subscriptions = await listActiveSubscriptions();
-    if (!subscriptions.length) {
-      await sendMessage(chatId, "🔁 AKTİF ABONELİK YOK.", adminMenu);
-      return;
-    }
-    const lines = subscriptions.map((subscription) => {
-      const date = new Date(subscription.expiresAt).toLocaleString("tr-TR", {
-        timeZone: "Europe/Istanbul",
-      });
-      return `#${subscription.userId} · ${subscription.title} · ${date} tarihine kadar`;
-    });
-    await sendMessage(chatId, `🔁 AKTİF ABONELİKLER\n\n${lines.join("\n")}`, adminMenu);
-    return;
-  }
-
-  const subscriptions = await listUserSubscriptions(userId);
-  if (!subscriptions.length) {
-    await sendMessage(chatId, "🔁 AKTİF ABONELİĞİNİZ BULUNMUYOR.", customerMenu);
-    return;
-  }
-  const lines = subscriptions.map((subscription) => {
-    const date = new Date(subscription.expiresAt).toLocaleString("tr-TR", {
-      timeZone: "Europe/Istanbul",
-    });
-    return `${subscription.title} · ${date} tarihine kadar`;
-  });
-  await sendMessage(chatId, `🔁 ABONELİKLERİM\n\n${lines.join("\n")}`, customerMenu);
-}
-
 async function showSupportSettings(chatId: number): Promise<void> {
   const supportUrl = await getSetting("support_url");
   await sendMessage(
     chatId,
-    `Satın alanlara gösterilen yetkili bağlantısı: ${supportUrl || "Ayarlanmadı"}\n\nYeni bağlantı gönderebilir veya kapatmak için /clear yazabilirsiniz.`,
-    keyboard([[{ text: "Yönetim menüsü", callback_data: "menu:admin" }]]),
+    `💬 DESTEK BAĞLANTISI\n\nSatın alanlara gösterilen bağlantı: ${supportUrl || "Ayarlanmadı"}\n\nYeni bir HTTPS bağlantısı gönderin. Kapatmak için /clear yazın.`,
+    keyboard([[{ text: "⚙️ YÖNETİM MENÜSÜ", callback_data: "menu:admin" }]]),
   );
 }
 
@@ -275,7 +230,7 @@ async function exportBackup(chatId: number): Promise<void> {
   if (Buffer.byteLength(content, "utf8") > MAX_BACKUP_BYTES) {
     await sendMessage(
       chatId,
-      "Yedek dosyası 8 MB sınırını aşıyor. Lütfen eski sipariş geçmişini arşivleyip yeniden deneyin.",
+      "⚠️ YEDEK DOSYASI 8 MB SINIRINI AŞIYOR. Sipariş geçmişini arşivleyip yeniden deneyin.",
       adminMenu,
     );
     return;
@@ -285,7 +240,7 @@ async function exportBackup(chatId: number): Promise<void> {
     chatId,
     `telegram-backup-${suffix}.json`,
     content,
-    "💾 TELEGRAM BOT YEDEĞİ\n\nÜrünler, siparişler, abonelikler ve ayarlar bu dosyadadır.",
+    "💾 TELEGRAM BOT YEDEĞİ\n\nÜrünler, siparişler ve ayarlar bu dosyadadır.",
   );
 }
 
@@ -297,7 +252,7 @@ async function handleBackupDocument(message: TelegramMessage): Promise<void> {
   if (session?.stage !== "backup-await-file") {
     await sendMessage(
       message.chat.id,
-      "Önce yönetim menüsünden “📥 YEDEĞİ GERİ YÜKLE” seçeneğine basın.",
+      "📥 ÖNCE YÖNETİM MENÜSÜNDEN “YEDEĞİ GERİ YÜKLE” SEÇENEĞİNE BASIN.",
       adminMenu,
     );
     return;
@@ -316,9 +271,12 @@ async function handleBackupDocument(message: TelegramMessage): Promise<void> {
     const parsed: unknown = JSON.parse(contents);
     const snapshot = parseTelegramBackup(parsed);
     await saveSession(userId, "backup-confirm", { snapshot });
+    const legacyNote = snapshot.legacyConversion
+      ? `\n\nℹ️ Eski yedekteki ${snapshot.legacyConversion.convertedPlans} plan tek seferlik ürüne çevrilecek; ${snapshot.legacyConversion.ignoredSubscriptions} abonelik kaydı alınmayacak.`
+      : "";
     await sendMessage(
       message.chat.id,
-      `✅ YEDEK DOĞRULANDI\n\n📦 ${snapshot.products.length} ürün · 🧾 ${snapshot.orders.length} sipariş · 🔁 ${snapshot.subscriptions.length} abonelik\n\nOnaylarsanız mevcut ürünler, siparişler, abonelikler ve ayarlar bu yedekteki verilerle tamamen değişir.`,
+      `✅ YEDEK DOĞRULANDI\n\n📦 ${snapshot.products.length} ürün · 🧾 ${snapshot.orders.length} sipariş\n\nOnaylarsanız mevcut ürünler, siparişler ve ayarlar bu yedekteki verilerle tamamen değişir.${legacyNote}`,
       keyboard([
         [{ text: "⚠️ YEDEĞİ GERİ YÜKLE", callback_data: "backup:confirm" }],
         [{ text: "❌ İPTAL ET", callback_data: "backup:cancel" }],
@@ -357,9 +315,6 @@ async function startPurchase(
     provider_token: "",
     currency: "XTR",
     prices: [{ label: product.title.slice(0, 32), amount: product.priceStars }],
-    ...(product.billingType === "subscription"
-      ? { subscription_period: product.periodSeconds || SUBSCRIPTION_PERIOD_SECONDS }
-      : {}),
   });
 }
 
@@ -375,7 +330,7 @@ async function handlePreCheckout(update: TelegramUpdate): Promise<void> {
   await telegramCall<boolean>("answerPreCheckoutQuery", {
     pre_checkout_query_id: query.id,
     ok: valid,
-    ...(valid ? {} : { error_message: "Sipariş bilgisi doğrulanamadı. Lütfen yeniden deneyin." }),
+    ...(valid ? {} : { error_message: "⚠️ SİPARİŞ DOĞRULANAMADI. Yeniden deneyin." }),
   });
 }
 
@@ -390,21 +345,18 @@ async function handleSuccessfulPayment(message: TelegramMessage): Promise<void> 
     currency: payment.currency,
     totalAmount: payment.total_amount,
     chargeId: payment.telegram_payment_charge_id,
-    ...(payment.subscription_expiration_date
-      ? { subscriptionExpirationDate: payment.subscription_expiration_date }
-      : {}),
   });
 
   if (!receipt) {
     logger.warn("Telegram payment could not be matched to a pending order.");
     await sendMessage(
       message.chat.id,
-      "Ödemeniz alındı ancak sipariş bilgisi doğrulanamadı. Lütfen yetkiliyle iletişime geçin.",
+      "⚠️ ÖDEME ALINDI ANCAK SİPARİŞ DOĞRULANAMADI.\n\nLütfen yetkiliyle iletişime geçin.",
       customerMenu,
     );
     const admin = adminId();
     if (admin) {
-      await sendMessage(admin, "Eşleşmeyen Telegram Stars ödemesi var. Bot kayıtlarını kontrol edin.");
+      await sendMessage(admin, "⚠️ EŞLEŞMEYEN TELEGRAM STARS ÖDEMESİ VAR.\n\nBot kayıtlarını kontrol edin.");
     }
     return;
   }
@@ -484,14 +436,11 @@ async function handleAdminInput(
       await sendMessage(chatId, "⚠️ FİYAT 1 İLE 1.000.000.000 ARASINDA TAM SAYI OLMALI.");
       return;
     }
-    await saveSession(userId, "product-billing-type", { ...data, priceStars: price });
+    await saveSession(userId, "product-photo", { ...data, priceStars: price });
     await sendMessage(
       chatId,
-      "💳 ÜRÜNÜN SATIŞ TÜRÜNÜ SEÇİN:",
-      keyboard([
-        [{ text: "🛒 TEK SEFERLİK", callback_data: "adm:product-billing:one_time" }],
-        [{ text: "🔁 AYLIK ABONELİK", callback_data: "adm:product-billing:subscription" }],
-      ]),
+      "📸 ÜRÜN FOTOĞRAFINI GÖNDERİN VEYA FOTOĞRAFSIZ DEVAM ETMEK İÇİN ATLA DÜĞMESİNE BASIN.",
+      keyboard([[{ text: "⏭️ FOTOĞRAFI ATLA", callback_data: "adm:photo-skip" }]]),
     );
     return;
   }
@@ -510,10 +459,6 @@ async function handleAdminInput(
       title: dataString(data, "title"),
       description: dataString(data, "description"),
       priceStars: dataNumber(data, "priceStars"),
-      billingType:
-        dataString(data, "billingType") === "subscription"
-          ? "subscription"
-          : "one_time",
       photoFileId: dataString(data, "photoFileId") || null,
       postPurchaseMessage: value === "/skip" ? "" : value,
     });
@@ -534,23 +479,23 @@ async function handleAdminInput(
     if (value.toLowerCase() === "/clear" || value.toLowerCase() === "off") {
       await setSetting("support_url", "");
       await clearSession(userId);
-      await sendMessage(chatId, "Yetkili bağlantısı kapatıldı.", adminMenu);
+      await sendMessage(chatId, "✅ YETKİLİ BAĞLANTISI KAPATILDI.", adminMenu);
       return;
     }
     let parsed: URL;
     try {
       parsed = new URL(value);
     } catch {
-      await sendMessage(chatId, "Geçerli bir bağlantı gönderin; bağlantı https:// ile başlamalı.");
+      await sendMessage(chatId, "⚠️ GEÇERLİ BİR BAĞLANTI GÖNDERİN. HTTPS:// İLE BAŞLAMALI.");
       return;
     }
     if (parsed.protocol !== "https:") {
-      await sendMessage(chatId, "Güvenlik için bağlantı https:// ile başlamalı.");
+      await sendMessage(chatId, "🔒 GÜVENLİK İÇİN BAĞLANTI HTTPS:// İLE BAŞLAMALI.");
       return;
     }
     await setSetting("support_url", parsed.toString());
     await clearSession(userId);
-    await sendMessage(chatId, "Yetkili bağlantısı kaydedildi.", adminMenu);
+    await sendMessage(chatId, "✅ YETKİLİ BAĞLANTISI KAYDEDİLDİ.", adminMenu);
     return;
   }
 }
@@ -584,7 +529,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   if (isAdmin(userId) && text === "/cancel") {
     await clearSession(userId);
-    await sendMessage(chatId, "İşlem iptal edildi.", adminMenu);
+    await sendMessage(chatId, "❌ İŞLEM İPTAL EDİLDİ.", adminMenu);
     return;
   }
 
@@ -598,7 +543,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   await sendMessage(
     chatId,
-    "Lütfen menüdeki butonlardan birini seçin. Menüye dönmek için /start yazın.",
+    "👇 LÜTFEN MENÜDEKİ BUTONLARDAN BİRİNİ SEÇİN.\n\nAna menüye dönmek için /start yazın.",
     isAdmin(userId) ? adminMenu : customerMenu,
   );
 }
@@ -612,7 +557,7 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
 
   if ((data.startsWith("adm:") || data.startsWith("backup:")) && !isAdmin(userId)) {
     await acknowledgeCallback(query.id, {
-      text: "Bu işlem yöneticiye özeldir.",
+      text: "🔒 BU İŞLEM YÖNETİCİYE ÖZELDİR.",
       show_alert: true,
     });
     return;
@@ -629,10 +574,6 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
   }
   if (data === "menu:products") {
     await showProducts(chatId);
-    return;
-  }
-  if (data === "menu:subscriptions") {
-    await showSubscriptions(chatId, false, userId);
     return;
   }
   if (data === "backup:cancel") {
@@ -652,7 +593,7 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
       await clearSession(userId);
       await sendMessage(
         chatId,
-        `✅ YEDEK GERİ YÜKLENDİ\n\n📦 ${snapshot.products.length} ürün · 🧾 ${snapshot.orders.length} sipariş · 🔁 ${snapshot.subscriptions.length} abonelik`,
+        `✅ YEDEK GERİ YÜKLENDİ\n\n📦 ${snapshot.products.length} ürün · 🧾 ${snapshot.orders.length} sipariş`,
         adminMenu,
       );
     } catch (error) {
@@ -671,33 +612,12 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
     return;
   }
 
-  if (data === "adm:product-billing:one_time" || data === "adm:product-billing:subscription") {
-    const session = await getSession(userId);
-    if (session?.stage !== "product-billing-type") {
-      await sendMessage(chatId, "⚠️ ÜRÜN EKLEME OTURUMU BULUNAMADI. Yeniden başlayın.", adminMenu);
-      return;
-    }
-    const billingType = data.endsWith("subscription") ? "subscription" : "one_time";
-    await saveSession(userId, "product-photo", {
-      ...session.data,
-      billingType,
-    });
-    await sendMessage(
-      chatId,
-      "📸 ÜRÜN FOTOĞRAFINI GÖNDERİN VEYA FOTOĞRAFSIZ DEVAM ETMEK İÇİN ATLA DÜĞMESİNE BASIN.",
-      keyboard([[{ text: "⏭️ FOTOĞRAFI ATLA", callback_data: "adm:photo-skip" }]]),
-    );
-    return;
-  }
-
   if (data === "adm:products") {
     await showProducts(chatId, true);
   } else if (data === "adm:add-product") {
     await beginProductCreation(chatId, userId);
   } else if (data === "adm:orders") {
     await showOrders(chatId);
-  } else if (data === "adm:subscriptions") {
-    await showSubscriptions(chatId, true, userId);
   } else if (data === "adm:support") {
     await saveSession(userId, "support-url", {});
     await showSupportSettings(chatId);
@@ -724,18 +644,6 @@ async function handleCallback(update: TelegramUpdate): Promise<void> {
     if (id) {
       await toggleProduct(id);
       await sendProductSettings(chatId, id);
-    }
-  } else if (data.startsWith("adm:product-type:")) {
-    const id = asId(data.slice("adm:product-type:".length));
-    if (id) {
-      const product = await getProduct(id);
-      if (product) {
-        await setProductBillingType(
-          id,
-          product.billingType === "subscription" ? "one_time" : "subscription",
-        );
-        await sendProductSettings(chatId, id);
-      }
     }
   } else if (data.startsWith("adm:product:")) {
     const id = asId(data.slice("adm:product:".length));

@@ -17,6 +17,11 @@ out-tsc
 # dependencies
 node_modules
 
+# Local environment configuration
+.env
+.env.*
+!.env.example
+
 # IDEs and editors
 /.idea
 .project
@@ -53,3 +58,8 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Local SQLite databases and journal files
+**/*.sqlite
+**/*.sqlite-shm
+**/*.sqlite-wal
